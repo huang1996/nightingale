@@ -1,0 +1,10 @@
+FROM --platform=$TARGETPLATFORM python:3-slim
+
+WORKDIR /app
+ADD n9e-edge /app/
+ADD etc /app/etc/
+ADD integrations /app/integrations/
+
+EXPOSE 17000
+
+CMD ["/app/n9e-edge"]
