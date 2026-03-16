@@ -113,7 +113,7 @@ dockers:
     goos: linux
     goarch: amd64
     ids:
-      - build
+      - build-edge
     dockerfile: docker/Dockerfile.goreleaser.edge
     extra_files:
       - etc
@@ -126,7 +126,7 @@ dockers:
     goos: linux
     goarch: arm64
     ids:
-      - build
+      - build-edge
     dockerfile: docker/Dockerfile.goreleaser.edge.arm64
     extra_files:
       - etc
