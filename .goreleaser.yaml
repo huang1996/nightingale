@@ -77,13 +77,13 @@ archives:
 
 release:
   github:
-    owner: ccfos
+    owner: huang1996
     name: nightingale
   name_template: "v{{ .Version }}"
 
 dockers:
   - image_templates:
-      - flashcatcloud/nightingale:{{ .Version }}-amd64
+      - huangtao1996/nightingale:{{ .Version }}-amd64
     goos: linux
     goarch: amd64
     ids:
@@ -96,7 +96,7 @@ dockers:
     build_flag_templates:
       - "--platform=linux/amd64"
   - image_templates:
-      - flashcatcloud/nightingale:{{ .Version }}-arm64v8
+      - huangtao1996/nightingale:{{ .Version }}-arm64v8
     goos: linux
     goarch: arm64
     ids:
@@ -111,12 +111,12 @@ dockers:
 
 docker_manifests:
 
-  - name_template: flashcatcloud/nightingale:{{ .Version }}
+  - name_template: huangtao1996/nightingale:{{ .Version }}
     image_templates:
-      - flashcatcloud/nightingale:{{ .Version }}-amd64
-      - flashcatcloud/nightingale:{{ .Version }}-arm64v8
+      - huangtao1996/nightingale:{{ .Version }}-amd64
+      - huangtao1996/nightingale:{{ .Version }}-arm64v8
 
-  - name_template: flashcatcloud/nightingale:latest
+  - name_template: huangtao1996/nightingale:latest
     image_templates:
-      - flashcatcloud/nightingale:{{ .Version }}-amd64
-      - flashcatcloud/nightingale:{{ .Version }}-arm64v8
+      - huangtao1996/nightingale:{{ .Version }}-amd64
+      - huangtao1996/nightingale:{{ .Version }}-arm64v8
