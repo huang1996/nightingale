@@ -2,18 +2,17 @@ version: 2
 
 before:
   hooks:
-    # You may remove this if you don't use go modules.
     - go mod tidy
     - go install github.com/rakyll/statik
 
 snapshot:
-  name_template: '{{ .Tag }}'
-  
+  name_template: '{{ .Tag }}-SNAPSHOT-{{ .ShortCommit }}'
+
 checksum:
   name_template: 'checksums.txt'
-  
+
 changelog:
-  disable: true  # 将原来的 skip: true 改为 disable: true
+  disable: true
 
 builds:
   - id: build
@@ -87,7 +86,8 @@ release:
 
 dockers:
   - image_templates:
-      - huangtao1996/nightingale:{{ .Version }}-amd64
+      - "{{ .Env.DOCKERHUB_USERNAME }}/nightingale:{{ .Version }}-amd64"
+      - "{{ .Env.DOCKERHUB_USERNAME }}/nightingale:latest-amd64"
     goos: linux
     goarch: amd64
     ids:
@@ -99,9 +99,14 @@ dockers:
     use: buildx
     build_flag_templates:
       - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.created={{.Date}}"
+      - "--label=org.opencontainers.image.title={{.ProjectName}}"
+      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+      - "--label=org.opencontainers.image.version={{.Version}}"
   
   - image_templates:
-      - huangtao1996/nightingale:{{ .Version }}-arm64v8
+      - "{{ .Env.DOCKERHUB_USERNAME }}/nightingale:{{ .Version }}-arm64v8"
+      - "{{ .Env.DOCKERHUB_USERNAME }}/nightingale:latest-arm64v8"
     goos: linux
     goarch: arm64
     ids:
@@ -113,9 +118,14 @@ dockers:
     use: buildx
     build_flag_templates:
       - "--platform=linux/arm64/v8"
+      - "--label=org.opencontainers.image.created={{.Date}}"
+      - "--label=org.opencontainers.image.title={{.ProjectName}}"
+      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+      - "--label=org.opencontainers.image.version={{.Version}}"
   
   - image_templates:
-      - huangtao1996/n9e-edge:{{ .Version }}-amd64
+      - "{{ .Env.DOCKERHUB_USERNAME }}/n9e-edge:{{ .Version }}-amd64"
+      - "{{ .Env.DOCKERHUB_USERNAME }}/n9e-edge:latest-amd64"
     goos: linux
     goarch: amd64
     ids:
@@ -127,9 +137,14 @@ dockers:
     use: buildx
     build_flag_templates:
       - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.created={{.Date}}"
+      - "--label=org.opencontainers.image.title={{.ProjectName}}"
+      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+      - "--label=org.opencontainers.image.version={{.Version}}"
   
   - image_templates:
-      - huangtao1996/n9e-edge:{{ .Version }}-arm64v8
+      - "{{ .Env.DOCKERHUB_USERNAME }}/n9e-edge:{{ .Version }}-arm64v8"
+      - "{{ .Env.DOCKERHUB_USERNAME }}/n9e-edge:latest-arm64v8"
     goos: linux
     goarch: arm64
     ids:
@@ -141,24 +156,28 @@ dockers:
     use: buildx
     build_flag_templates:
       - "--platform=linux/arm64/v8"
+      - "--label=org.opencontainers.image.created={{.Date}}"
+      - "--label=org.opencontainers.image.title={{.ProjectName}}"
+      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+      - "--label=org.opencontainers.image.version={{.Version}}"
 
 docker_manifests:
-  - name_template: huangtao1996/nightingale:{{ .Version }}
+  - name_template: "{{ .Env.DOCKERHUB_USERNAME }}/nightingale:{{ .Version }}"
     image_templates:
-      - huangtao1996/nightingale:{{ .Version }}-amd64
-      - huangtao1996/nightingale:{{ .Version }}-arm64v8
+      - "{{ .Env.DOCKERHUB_USERNAME }}/nightingale:{{ .Version }}-amd64"
+      - "{{ .Env.DOCKERHUB_USERNAME }}/nightingale:{{ .Version }}-arm64v8"
 
-  - name_template: huangtao1996/nightingale:latest
+  - name_template: "{{ .Env.DOCKERHUB_USERNAME }}/nightingale:latest"
     image_templates:
-      - huangtao1996/nightingale:{{ .Version }}-amd64
-      - huangtao1996/nightingale:{{ .Version }}-arm64v8
+      - "{{ .Env.DOCKERHUB_USERNAME }}/nightingale:latest-amd64"
+      - "{{ .Env.DOCKERHUB_USERNAME }}/nightingale:latest-arm64v8"
 
-  - name_template: huangtao1996/n9e-edge:{{ .Version }}
+  - name_template: "{{ .Env.DOCKERHUB_USERNAME }}/n9e-edge:{{ .Version }}"
     image_templates:
-      - huangtao1996/n9e-edge:{{ .Version }}-amd64
-      - huangtao1996/n9e-edge:{{ .Version }}-arm64v8
+      - "{{ .Env.DOCKERHUB_USERNAME }}/n9e-edge:{{ .Version }}-amd64"
+      - "{{ .Env.DOCKERHUB_USERNAME }}/n9e-edge:{{ .Version }}-arm64v8"
 
-  - name_template: huangtao1996/n9e-edge:latest
+  - name_template: "{{ .Env.DOCKERHUB_USERNAME }}/n9e-edge:latest"
     image_templates:
-      - huangtao1996/n9e-edge:{{ .Version }}-amd64
-      - huangtao1996/n9e-edge:{{ .Version }}-arm64v8
+      - "{{ .Env.DOCKERHUB_USERNAME }}/n9e-edge:latest-amd64"
+      - "{{ .Env.DOCKERHUB_USERNAME }}/n9e-edge:latest-arm64v8"
