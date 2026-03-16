@@ -108,6 +108,32 @@ dockers:
     use: buildx
     build_flag_templates:
       - "--platform=linux/arm64/v8"
+  - image_templates:
+      - huangtao1996/n9e-edge:{{ .Version }}-amd64
+    goos: linux
+    goarch: amd64
+    ids:
+      - build
+    dockerfile: docker/Dockerfile.goreleaser.edge
+    extra_files:
+      - etc
+      - integrations
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/amd64"
+  - image_templates:
+      - huangtao1996/n9e-edge:{{ .Version }}-arm64v8
+    goos: linux
+    goarch: arm64
+    ids:
+      - build
+    dockerfile: docker/Dockerfile.goreleaser.edge.arm64
+    extra_files:
+      - etc
+      - integrations
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/arm64/v8"
 
 docker_manifests:
 
@@ -120,3 +146,13 @@ docker_manifests:
     image_templates:
       - huangtao1996/nightingale:{{ .Version }}-amd64
       - huangtao1996/nightingale:{{ .Version }}-arm64v8
+
+  - name_template: huangtao1996/n9e-edge:{{ .Version }}
+    image_templates:
+      - huangtao1996/n9e-edge:{{ .Version }}-amd64
+      - huangtao1996/n9e-edge:{{ .Version }}-arm64v8
+
+  - name_template: huangtao1996/n9e-edge:latest
+    image_templates:
+      - huangtao1996/n9e-edge:{{ .Version }}-amd64
+      - huangtao1996/n9e-edge:{{ .Version }}-arm64v8
