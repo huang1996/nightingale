@@ -1,4 +1,5 @@
 version: 2
+
 before:
   hooks:
     # You may remove this if you don't use go modules.
@@ -7,10 +8,12 @@ before:
 
 snapshot:
   name_template: '{{ .Tag }}'
+  
 checksum:
   name_template: 'checksums.txt'
+  
 changelog:
-  skip: true
+  disable: true  # 将原来的 skip: true 改为 disable: true
 
 builds:
   - id: build
@@ -82,7 +85,6 @@ release:
     name: nightingale
   name_template: "v{{ .Version }}"
 
-# n9e 主程序 Docker 镜像
 dockers:
   - image_templates:
       - huangtao1996/nightingale:{{ .Version }}-amd64
@@ -112,7 +114,6 @@ dockers:
     build_flag_templates:
       - "--platform=linux/arm64/v8"
   
-  # n9e-edge Docker 镜像
   - image_templates:
       - huangtao1996/n9e-edge:{{ .Version }}-amd64
     goos: linux
@@ -141,7 +142,6 @@ dockers:
     build_flag_templates:
       - "--platform=linux/arm64/v8"
 
-# n9e 主程序 Docker manifests
 docker_manifests:
   - name_template: huangtao1996/nightingale:{{ .Version }}
     image_templates:
@@ -153,7 +153,6 @@ docker_manifests:
       - huangtao1996/nightingale:{{ .Version }}-amd64
       - huangtao1996/nightingale:{{ .Version }}-arm64v8
 
-  # n9e-edge Docker manifests
   - name_template: huangtao1996/n9e-edge:{{ .Version }}
     image_templates:
       - huangtao1996/n9e-edge:{{ .Version }}-amd64
