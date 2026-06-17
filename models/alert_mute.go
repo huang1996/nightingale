@@ -467,6 +467,19 @@ func AlertMuteDel(ctx *ctx.Context, ids []int64) error {
 	return DB(ctx).Where("id in ?", ids).Delete(new(AlertMute)).Error
 }
 
+// AlertMuteBatchDelete deletes time-range alert mutes that expired before the
+// given timestamp (etime > 0 AND etime < timestamp) and were created before
+// the timestamp. Periodic mutes are skipped. Optionally restrict to the
+// provided group IDs. Returns the number of rows deleted in this batch.
+func AlertMuteBatchDelete(ctx *ctx.Context, timestamp int64, groupIds []int64, limit int) (int64, error) {
+	db := DB(ctx).Where("mute_time_type = ? AND etime > 0 AND etime < ? AND create_at < ?", TimeRange, timestamp, timestamp)
+	if len(groupIds) > 0 {
+		db = db.Where("group_id IN (?)", groupIds)
+	}
+	res := db.Limit(limit).Delete(&AlertMute{})
+	return res.RowsAffected, res.Error
+}
+
 func AlertMuteStatistics(ctx *ctx.Context) (*Statistics, error) {
 	var stats []*Statistics
 	if !ctx.IsCenter {

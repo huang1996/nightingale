@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -10,10 +11,10 @@ import (
 
 	"github.com/ccfos/nightingale/v6/models"
 	"github.com/ccfos/nightingale/v6/pkg/ctx"
+	"github.com/ccfos/nightingale/v6/pkg/ginx"
 	"github.com/ccfos/nightingale/v6/pkg/strx"
 	"github.com/ccfos/nightingale/v6/pushgw/idents"
 	"github.com/ccfos/nightingale/v6/storage"
-	"github.com/ccfos/nightingale/v6/pkg/ginx"
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/common/model"
@@ -68,9 +69,8 @@ func (rt *Router) targetGets(c *gin.Context) {
 
 	var err error
 	if len(bgids) > 0 {
-		// 如果用户当前查看的是未归组机器，会传入 bgids = [0]，此时是不需要校验的，故而排除这种情况
-		if !(len(bgids) == 1 && bgids[0] == 0) {
-			for _, gid := range bgids {
+		for _, gid := range bgids {
+			if gid > 0 {
 				rt.bgroCheck(c, gid)
 			}
 		}
@@ -265,7 +265,7 @@ func (rt *Router) targetBindTagsByFE(c *gin.Context) {
 	// Acquire idents by idents and hostIps
 	failedResults, f.Idents, err = models.TargetsGetIdentsByIdentsAndHostIps(rt.Ctx, f.Idents, f.HostIps)
 	if err != nil {
-		ginx.Bomb(http.StatusBadRequest, err.Error())
+		bombErr(http.StatusBadRequest, err)
 	}
 
 	rt.checkTargetPerm(c, f.Idents)
@@ -285,7 +285,7 @@ func (rt *Router) targetBindTagsByService(c *gin.Context) {
 	// Acquire idents by idents and hostIps
 	failedResults, f.Idents, err = models.TargetsGetIdentsByIdentsAndHostIps(rt.Ctx, f.Idents, f.HostIps)
 	if err != nil {
-		ginx.Bomb(http.StatusBadRequest, err.Error())
+		bombErr(http.StatusBadRequest, err)
 	}
 
 	ginx.NewRender(c).Data(rt.targetBindTags(f, failedResults))
@@ -368,7 +368,7 @@ func (rt *Router) targetUnbindTagsByFE(c *gin.Context) {
 	// Acquire idents by idents and hostIps
 	failedResults, f.Idents, err = models.TargetsGetIdentsByIdentsAndHostIps(rt.Ctx, f.Idents, f.HostIps)
 	if err != nil {
-		ginx.Bomb(http.StatusBadRequest, err.Error())
+		bombErr(http.StatusBadRequest, err)
 	}
 
 	rt.checkTargetPerm(c, f.Idents)
@@ -388,7 +388,7 @@ func (rt *Router) targetUnbindTagsByService(c *gin.Context) {
 	// Acquire idents by idents and hostIps
 	failedResults, f.Idents, err = models.TargetsGetIdentsByIdentsAndHostIps(rt.Ctx, f.Idents, f.HostIps)
 	if err != nil {
-		ginx.Bomb(http.StatusBadRequest, err.Error())
+		bombErr(http.StatusBadRequest, err)
 	}
 
 	ginx.NewRender(c).Data(rt.targetUnbindTags(f, failedResults))
@@ -432,7 +432,7 @@ func (rt *Router) targetUpdateNote(c *gin.Context) {
 	// Acquire idents by idents and hostIps
 	failedResults, f.Idents, err = models.TargetsGetIdentsByIdentsAndHostIps(rt.Ctx, f.Idents, f.HostIps)
 	if err != nil {
-		ginx.Bomb(http.StatusBadRequest, err.Error())
+		bombErr(http.StatusBadRequest, err)
 	}
 
 	rt.checkTargetPerm(c, f.Idents)
@@ -453,7 +453,7 @@ func (rt *Router) targetUpdateNoteByService(c *gin.Context) {
 	// Acquire idents by idents and hostIps
 	failedResults, f.Idents, err = models.TargetsGetIdentsByIdentsAndHostIps(rt.Ctx, f.Idents, f.HostIps)
 	if err != nil {
-		ginx.Bomb(http.StatusBadRequest, err.Error())
+		bombErr(http.StatusBadRequest, err)
 	}
 
 	ginx.NewRender(c).Data(failedResults, models.TargetUpdateNote(rt.Ctx, f.Idents, f.Note))
@@ -471,6 +471,7 @@ type targetBgidsForm struct {
 	Bgids   []int64  `json:"bgids"`
 	Tags    []string `json:"tags"`
 	Action  string   `json:"action"` // add del reset
+	Force   bool     `json:"force"`  // 强制执行，跳过采集任务关联检查
 }
 
 func haveNeverGroupedIdent(ctx *ctx.Context, idents []string) (bool, error) {
@@ -501,7 +502,7 @@ func (rt *Router) targetBindBgids(c *gin.Context) {
 	// Acquire idents by idents and hostIps
 	failedResults, f.Idents, err = models.TargetsGetIdentsByIdentsAndHostIps(rt.Ctx, f.Idents, f.HostIps)
 	if err != nil {
-		ginx.Bomb(http.StatusBadRequest, err.Error())
+		bombErr(http.StatusBadRequest, err)
 	}
 
 	user := c.MustGet("user").(*models.User)
@@ -546,8 +547,31 @@ func (rt *Router) targetBindBgids(c *gin.Context) {
 	case "add":
 		ginx.NewRender(c).Data(failedResults, models.TargetBindBgids(rt.Ctx, f.Idents, f.Bgids, f.Tags))
 	case "del":
+		// 非强制时逐台校验是否满足移出条件，有机器不满足则原样返回且不执行，前端确认后带 force=true 重试。
+		if !f.Force {
+			blocked, err := rt.TargetBgidChangeCheck(f.Idents, "del", f.Bgids)
+			ginx.Dangerous(err)
+			if len(blocked) > 0 {
+				for ident, msg := range blocked {
+					failedResults[ident] = msg
+				}
+				ginx.NewRender(c).Data(failedResults, nil)
+				return
+			}
+		}
 		ginx.NewRender(c).Data(failedResults, models.TargetUnbindBgids(rt.Ctx, f.Idents, f.Bgids))
 	case "reset":
+		if !f.Force {
+			blocked, err := rt.TargetBgidChangeCheck(f.Idents, "reset", f.Bgids)
+			ginx.Dangerous(err)
+			if len(blocked) > 0 {
+				for ident, msg := range blocked {
+					failedResults[ident] = msg
+				}
+				ginx.NewRender(c).Data(failedResults, nil)
+				return
+			}
+		}
 		ginx.NewRender(c).Data(failedResults, models.TargetOverrideBgids(rt.Ctx, f.Idents, f.Bgids, f.Tags))
 	default:
 		ginx.Bomb(http.StatusBadRequest, "invalid action")
@@ -567,7 +591,7 @@ func (rt *Router) targetUpdateBgidByService(c *gin.Context) {
 	// Acquire idents by idents and hostIps
 	failedResults, f.Idents, err = models.TargetsGetIdentsByIdentsAndHostIps(rt.Ctx, f.Idents, f.HostIps)
 	if err != nil {
-		ginx.Bomb(http.StatusBadRequest, err.Error())
+		bombErr(http.StatusBadRequest, err)
 	}
 
 	ginx.NewRender(c).Data(failedResults, models.TargetOverrideBgids(rt.Ctx, f.Idents, []int64{f.Bgid}, nil))
@@ -576,6 +600,7 @@ func (rt *Router) targetUpdateBgidByService(c *gin.Context) {
 type identsForm struct {
 	Idents  []string `json:"idents" binding:"required_without=HostIps"`
 	HostIps []string `json:"host_ips" binding:"required_without=Idents"`
+	Force   bool     `json:"force"` // 强制执行，跳过采集任务关联检查
 }
 
 func (rt *Router) targetDel(c *gin.Context) {
@@ -591,10 +616,22 @@ func (rt *Router) targetDel(c *gin.Context) {
 	// Acquire idents by idents and hostIps
 	failedResults, f.Idents, err = models.TargetsGetIdentsByIdentsAndHostIps(rt.Ctx, f.Idents, f.HostIps)
 	if err != nil {
-		ginx.Bomb(http.StatusBadRequest, err.Error())
+		bombErr(http.StatusBadRequest, err)
 	}
 
-	ginx.NewRender(c).Data(failedResults, models.TargetDel(rt.Ctx, f.Idents, rt.TargetDeleteHook))
+	// 非强制删除时，先逐台校验是否满足删除条件（如仍被采集任务引用）。
+	// 只要有机器不满足，就把它们连同原因一并返回，且不执行任何删除；前端确认后带 force=true 重试。
+	if !f.Force {
+		if blocked := rt.TargetDeleteCheck(f.Idents); len(blocked) > 0 {
+			for ident, msg := range blocked {
+				failedResults[ident] = msg
+			}
+			ginx.NewRender(c).Data(failedResults, nil)
+			return
+		}
+	}
+
+	ginx.NewRender(c).Data(failedResults, models.TargetDel(rt.Ctx, f.Idents, f.Force, rt.TargetDeleteHook))
 }
 
 func (rt *Router) targetDelByService(c *gin.Context) {
@@ -610,15 +647,19 @@ func (rt *Router) targetDelByService(c *gin.Context) {
 	// Acquire idents by idents and hostIps
 	failedResults, f.Idents, err = models.TargetsGetIdentsByIdentsAndHostIps(rt.Ctx, f.Idents, f.HostIps)
 	if err != nil {
-		ginx.Bomb(http.StatusBadRequest, err.Error())
+		bombErr(http.StatusBadRequest, err)
 	}
 
-	ginx.NewRender(c).Data(failedResults, models.TargetDel(rt.Ctx, f.Idents, rt.TargetDeleteHook))
+	ginx.NewRender(c).Data(failedResults, models.TargetDel(rt.Ctx, f.Idents, true, rt.TargetDeleteHook))
 }
 
 func (rt *Router) checkTargetPerm(c *gin.Context, idents []string) {
+	CheckTargetPerm(rt.Ctx, c, idents)
+}
+
+func CheckTargetPerm(ctx *ctx.Context, c *gin.Context, idents []string) {
 	user := c.MustGet("user").(*models.User)
-	nopri, err := user.NopriIdents(rt.Ctx, idents)
+	nopri, err := user.NopriIdents(ctx, idents)
 	ginx.Dangerous(err)
 
 	if len(nopri) > 0 {
@@ -644,13 +685,22 @@ func (rt *Router) targetsOfAlertRule(c *gin.Context) {
 	ginx.NewRender(c).Data(ret, err)
 }
 
-func (rt *Router) checkTargetsExistByIndent(idents []string) {
-	notExists, err := models.TargetNoExistIdents(rt.Ctx, idents)
-	ginx.Dangerous(err)
+func CheckTargetsExistByIndent(ctx *ctx.Context, idents []string) error {
+	notExists, err := models.TargetNoExistIdents(ctx, idents)
+	if err != nil {
+		return err
+	}
 
 	if len(notExists) > 0 {
-		ginx.Bomb(http.StatusBadRequest, "targets not exist: %s", strings.Join(notExists, ", "))
+		return errors.New("targets not exist: " + strings.Join(notExists, ", "))
 	}
+
+	return nil
+}
+
+func (rt *Router) checkTargetsExistByIndent(idents []string) {
+	err := CheckTargetsExistByIndent(rt.Ctx, idents)
+	ginx.Dangerous(err)
 }
 
 func (rt *Router) targetsOfHostQuery(c *gin.Context) {
@@ -662,10 +712,110 @@ func (rt *Router) targetsOfHostQuery(c *gin.Context) {
 	var lst []*models.Target
 	err := session.Find(&lst).Error
 	if err != nil {
-		ginx.Bomb(http.StatusInternalServerError, err.Error())
+		bombErr(http.StatusInternalServerError, err)
 	}
 
 	ginx.NewRender(c).Data(lst, nil)
+}
+
+func (rt *Router) targetStats(c *gin.Context) {
+	bgids := strx.IdsInt64ForAPI(ginx.QueryStr(c, "gids", ""), ",")
+
+	var err error
+	if len(bgids) > 0 {
+		for _, gid := range bgids {
+			if gid > 0 {
+				rt.bgroCheck(c, gid)
+			}
+		}
+	} else {
+		user := c.MustGet("user").(*models.User)
+		if !user.IsAdmin() {
+			bgids, err = models.MyBusiGroupIds(rt.Ctx, user.Id)
+			ginx.Dangerous(err)
+			bgids = append(bgids, 0)
+		}
+	}
+
+	targets := rt.TargetCache.GetAll()
+	now := time.Now().Unix()
+
+	var count, aliveCount, deadCount int64
+	memUsage := map[string]int64{"-1": 0, "20": 0, "40": 0, "60": 0, "80": 0, "100": 0}
+	cpuUsage := map[string]int64{"-1": 0, "20": 0, "40": 0, "60": 0, "80": 0, "100": 0}
+	versions := make(map[string]int64)
+
+	bgidSet := make(map[int64]struct{}, len(bgids))
+	for _, gid := range bgids {
+		bgidSet[gid] = struct{}{}
+	}
+	hasBgidFilter := len(bgids) > 0
+
+	for _, t := range targets {
+		if hasBgidFilter {
+			matched := false
+			if _, ok := bgidSet[0]; ok && len(t.GroupIds) == 0 {
+				matched = true
+			}
+			if !matched {
+				for _, gid := range t.GroupIds {
+					if _, ok := bgidSet[gid]; ok {
+						matched = true
+						break
+					}
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+
+		count++
+
+		if now-t.BeatTime < 180 {
+			aliveCount++
+		} else {
+			deadCount++
+		}
+
+		if t.CpuNum <= 0 {
+			cpuUsage["-1"]++
+			memUsage["-1"]++
+		} else {
+			cpuUsage[usageBucket(t.CpuUtil)]++
+			memUsage[usageBucket(t.MemUtil)]++
+		}
+
+		ver := t.AgentVersion
+		if ver == "" {
+			ver = "unknown"
+		}
+		versions[ver]++
+	}
+
+	ginx.NewRender(c).Data(gin.H{
+		"count":       count,
+		"alive_count": aliveCount,
+		"dead_count":  deadCount,
+		"mem_usage":   memUsage,
+		"cpu_usage":   cpuUsage,
+		"versions":    versions,
+	}, nil)
+}
+
+func usageBucket(val float64) string {
+	switch {
+	case val < 20:
+		return "20"
+	case val < 40:
+		return "40"
+	case val < 60:
+		return "60"
+	case val < 80:
+		return "80"
+	default:
+		return "100"
+	}
 }
 
 func (rt *Router) targetUpdate(c *gin.Context) {

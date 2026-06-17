@@ -1,5 +1,7 @@
 package models
 
+import "context"
+
 // WorkflowNode 工作流节点
 type WorkflowNode struct {
 	ID       string      `json:"id"`                 // 节点唯一ID
@@ -88,7 +90,7 @@ const (
 
 const (
 	UseCaseEventPipeline = "event_pipeline"
-	UseCaseEventSummary  = "firemap"
+	UseCaseAlertRule     = "alert_rule"
 )
 
 // WorkflowTriggerContext 工作流触发上下文
@@ -124,11 +126,15 @@ type WorkflowContext struct {
 	// 流式输出支持
 	Stream     bool              `json:"-"` // 是否启用流式输出（不序列化）
 	StreamChan chan *StreamChunk `json:"-"` // 流式数据通道（不序列化）
+
+	// 外部注入的父 context，用于支持调用方取消（如 assistant message cancel）
+	// 为 nil 时 Process 内部使用 context.Background() 作为父
+	ParentCtx context.Context `json:"-"`
 }
 
 // StreamChunk 类型常量
 const (
-	StreamTypeThinking   = "thinking"    // AI 思考过程（ReAct Thought）
+	StreamTypeThinking   = "thinking"    // AI 思考过程
 	StreamTypeToolCall   = "tool_call"   // 工具调用
 	StreamTypeToolResult = "tool_result" // 工具执行结果
 	StreamTypeText       = "text"        // LLM 文本输出

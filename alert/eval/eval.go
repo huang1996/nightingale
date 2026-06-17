@@ -18,6 +18,7 @@ import (
 	"github.com/ccfos/nightingale/v6/alert/common"
 	"github.com/ccfos/nightingale/v6/alert/process"
 	"github.com/ccfos/nightingale/v6/dscache"
+	dskittypes "github.com/ccfos/nightingale/v6/dskit/types"
 	"github.com/ccfos/nightingale/v6/models"
 	"github.com/ccfos/nightingale/v6/pkg/ctx"
 	"github.com/ccfos/nightingale/v6/pkg/hash"
@@ -198,38 +199,13 @@ func (arw *AlertRuleWorker) Eval() {
 		return
 	}
 
-	if arw.Inhibit {
-		pointsMap := make(map[string]models.AnomalyPoint)
-		for _, point := range recoverPoints {
-			// 对于恢复的事件，合并处理
-			tagHash := process.TagHash(point)
-
-			p, exists := pointsMap[tagHash]
-			if !exists {
-				pointsMap[tagHash] = point
-				continue
-			}
-
-			if p.Severity > point.Severity {
-				hash := process.Hash(cachedRule.Id, arw.Processor.DatasourceId(), p)
-				arw.Processor.DeleteProcessEvent(hash)
-				models.AlertCurEventDelByHash(arw.Ctx, hash)
-
-				pointsMap[tagHash] = point
-			}
-		}
-
-		now := time.Now().Unix()
-		for _, point := range pointsMap {
-			str := fmt.Sprintf("%v", point.Value)
-			arw.Processor.RecoverSingle(true, process.Hash(cachedRule.Id, arw.Processor.DatasourceId(), point), now, &str)
-		}
-	} else {
-		now := time.Now().Unix()
-		for _, point := range recoverPoints {
-			str := fmt.Sprintf("%v", point.Value)
-			arw.Processor.RecoverSingle(true, process.Hash(cachedRule.Id, arw.Processor.DatasourceId(), point), now, &str)
-		}
+	// 恢复不做抑制合并：每个 recover point 各自独立恢复。
+	// RecoverSingle 内部以 p.fires 是否存在为闸门，从未 fire 的档位自动 no-op，
+	// 因此 fire/recover 天然对称（fire 几条就 recover 几条），也不会误删其他档位的已 fire 状态。
+	now := time.Now().Unix()
+	for _, point := range recoverPoints {
+		str := fmt.Sprintf("%v", point.Value)
+		arw.Processor.RecoverSingle(true, process.Hash(cachedRule.Id, arw.Processor.DatasourceId(), point), now, &str)
 	}
 
 	arw.Processor.Handle(anomalyPoints, "inner", arw.Inhibit)
@@ -1497,6 +1473,11 @@ func (arw *AlertRuleWorker) GetAnomalyPoint(rule *models.AlertRule, dsId int64) 
 			}
 
 			ctx := context.WithValue(context.Background(), "delay", int64(rule.Delay))
+			ctx = dskittypes.WithCallContext(ctx, dskittypes.CallContext{
+				DatasourceID: dsId,
+				Operator:     "alert_rule",
+				RuleID:       rule.Id,
+			})
 			series, err := plug.QueryData(ctx, query)
 			arw.Processor.Stats.CounterQueryDataTotal.WithLabelValues(fmt.Sprintf("%d", arw.DatasourceId), fmt.Sprintf("%d", rule.Id)).Inc()
 			if err != nil {

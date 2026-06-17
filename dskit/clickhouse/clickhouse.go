@@ -44,10 +44,22 @@ type Clickhouse struct {
 	ClientByHTTP *sql.DB  `json:"-"`
 }
 
-func (c *Clickhouse) InitCli() error {
+// FillDefaults 把零值字段补成默认值. 必须在 dscache.Put 比较 Equal 之前调用,
+// 否则缓存里的 ds(已被 InitCli 补过默认值)会与每次同步新建的 ds(未补默认值)
+// 字段不一致, Equal 永远返回 false 触发反复 InitClient. 因此由外层 Validate 调用.
+func (c *Clickhouse) FillDefaults() {
 	if c.MaxQueryRows == 0 {
 		c.MaxQueryRows = DefaultLimit
 	}
+	// Timeout 当前 InitCli 已不再读取(DialTimeout 硬编码 10s), 但 Equal 仍比对该字段;
+	// 这里给个默认值保持对称, 避免后续有人重新启用 c.Timeout 时漏改这里导致 dscache 反复重建.
+	if c.Timeout <= 0 {
+		c.Timeout = 10000
+	}
+}
+
+func (c *Clickhouse) InitCli() error {
+	c.FillDefaults()
 
 	if len(c.Nodes) == 0 {
 		return fmt.Errorf("not found ck shard, please check datasource config")
@@ -198,25 +210,49 @@ func (c *Clickhouse) InitCli() error {
 	return nil
 }
 
+// Close 释放底层 *sql.DB / *gorm.DB 持有的连接池与后台 goroutine.
+//
+// 注意:
+//   - 不把字段置为 nil. 否则与 QueryRows 等使用者中的 `if c.X != nil { c.X.Query(...) }`
+//     形成数据竞争(两次 load 之间字段被改 nil 会导致 nil 解引用 panic).
+//   - 调用 Close 后, 并发中的查询会自然得到 "sql: database is closed" 错误,
+//     业务层正常错误处理即可. *sql.DB.Close 自身会等待已开始的查询结束.
+//   - *sql.DB.Close 多次调用是安全的(后续调用返回 error 但不 panic),
+//     因此 Close 不需要 sync.Once 也可幂等.
+func (c *Clickhouse) Close() error {
+	var firstErr error
+	if c.ClientByHTTP != nil {
+		if err := c.ClientByHTTP.Close(); err != nil {
+			firstErr = err
+		}
+	}
+	if c.Client != nil {
+		if sqlDB, err := c.Client.DB(); err == nil && sqlDB != nil {
+			if cerr := sqlDB.Close(); cerr != nil && firstErr == nil {
+				firstErr = cerr
+			}
+		}
+	}
+	return firstErr
+}
+
 const (
 	ShowDatabases = "SHOW DATABASES"
-	ShowTables    = "SELECT name FROM system.tables WHERE database = '%s'"
-	DescTable     = "SELECT name,type FROM system.columns WHERE database='%s' AND table = '%s';"
 )
 
-func (c *Clickhouse) QueryRows(ctx context.Context, query string) (*sql.Rows, error) {
+func (c *Clickhouse) QueryRows(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
 	var (
 		rows *sql.Rows
 		err  error
 	)
 
 	if c.ClientByHTTP != nil {
-		rows, err = c.ClientByHTTP.Query(query)
+		rows, err = c.ClientByHTTP.Query(query, args...)
 		if err != nil {
 			return nil, err
 		}
 	} else if c.Client != nil {
-		rows, err = c.Client.Raw(query).Rows()
+		rows, err = c.Client.Raw(query, args...).Rows()
 		if err != nil {
 			return nil, err
 		}
@@ -249,10 +285,13 @@ func (c *Clickhouse) ShowDatabases(ctx context.Context) ([]string, error) {
 
 // ShowTables lists all tables in a given database
 func (c *Clickhouse) ShowTables(ctx context.Context, database string) ([]string, error) {
+	if err := sqlbase.ValidateIdentifier(database); err != nil {
+		return nil, fmt.Errorf("show tables: %w", err)
+	}
 	res := make([]string, 0)
 
-	showTables := fmt.Sprintf(ShowTables, database)
-	rows, err := c.QueryRows(ctx, showTables)
+	rows, err := c.QueryRows(ctx,
+		"SELECT name FROM system.tables WHERE database = ?", database)
 	if err != nil {
 		return nil, err
 	}
@@ -278,9 +317,16 @@ func (c *Clickhouse) DescribeTable(ctx context.Context, query interface{}) ([]*t
 	if err := mapstructure.Decode(query, ckQueryParam); err != nil {
 		return nil, err
 	}
-	descTable := fmt.Sprintf(DescTable, ckQueryParam.Database, ckQueryParam.Table)
+	if err := sqlbase.ValidateIdentifier(ckQueryParam.Database); err != nil {
+		return nil, fmt.Errorf("describe table: %w", err)
+	}
+	if err := sqlbase.ValidateIdentifier(ckQueryParam.Table); err != nil {
+		return nil, fmt.Errorf("describe table: %w", err)
+	}
 
-	rows, err := c.QueryRows(ctx, descTable)
+	rows, err := c.QueryRows(ctx,
+		"SELECT name, type FROM system.columns WHERE database = ? AND table = ?",
+		ckQueryParam.Database, ckQueryParam.Table)
 	if err != nil {
 		return nil, err
 	}

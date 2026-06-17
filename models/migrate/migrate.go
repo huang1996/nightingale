@@ -21,12 +21,14 @@ func MigrateIbexTables(db *gorm.DB) {
 	var tableOptions string
 	switch db.Dialector.(type) {
 	case *mysql.Dialector:
-		tableOptions = "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+		tableOptions = "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci"
 	}
 
 	if tableOptions != "" {
 		db = db.Set("gorm:table_options", tableOptions)
 	}
+
+	fixTaskHostDoingPrimaryKey(db)
 
 	dts := []interface{}{&imodels.TaskMeta{}, &imodels.TaskScheduler{}, &TaskHostDoing{}, &imodels.TaskAction{}}
 	for _, dt := range dts {
@@ -50,6 +52,53 @@ func MigrateIbexTables(db *gorm.DB) {
 	}
 }
 
+// fixTaskHostDoingPrimaryKey repairs MySQL tables created by older releases that
+// declared id as the sole auto-increment primary key: inserting a second host for
+// the same task violated the primary key. AutoMigrate never alters an existing
+// table's primary key, so drop it manually. The table is deliberately left
+// without a primary key, same as tables created from the SQL init files.
+func fixTaskHostDoingPrimaryKey(db *gorm.DB) {
+	if _, ok := db.Dialector.(*mysql.Dialector); !ok {
+		return
+	}
+
+	if !db.Migrator().HasTable("task_host_doing") {
+		return
+	}
+
+	var pkCols []string
+	err := db.Raw(`SELECT COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'task_host_doing'
+		AND CONSTRAINT_NAME = 'PRIMARY' ORDER BY ORDINAL_POSITION`).Scan(&pkCols).Error
+	if err != nil {
+		logger.Errorf("failed to check task_host_doing primary key: %v", err)
+		return
+	}
+
+	if len(pkCols) != 1 || pkCols[0] != "id" {
+		return
+	}
+
+	// MODIFY without AUTO_INCREMENT strips the auto-increment attribute (it must
+	// go before DROP PRIMARY KEY); COLUMN_TYPE keeps the original signedness.
+	var colType string
+	err = db.Raw(`SELECT COLUMN_TYPE FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'task_host_doing'
+		AND COLUMN_NAME = 'id'`).Scan(&colType).Error
+	if err != nil || colType == "" {
+		logger.Errorf("failed to get task_host_doing id column type: %v err: %v", colType, err)
+		return
+	}
+
+	err = db.Exec(fmt.Sprintf("ALTER TABLE task_host_doing MODIFY id %s NOT NULL, DROP PRIMARY KEY", colType)).Error
+	if err != nil {
+		logger.Errorf("failed to drop task_host_doing legacy primary key: %v", err)
+		return
+	}
+
+	logger.Info("dropped task_host_doing legacy primary key on id")
+}
+
 func isPostgres(db *gorm.DB) bool {
 	dialect := db.Dialector.Name()
 	return dialect == "postgres"
@@ -58,24 +107,32 @@ func MigrateTables(db *gorm.DB) error {
 	var tableOptions string
 	switch db.Dialector.(type) {
 	case *mysql.Dialector:
-		tableOptions = "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+		tableOptions = "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci"
 	}
 	if tableOptions != "" {
 		db = db.Set("gorm:table_options", tableOptions)
 	}
 	dts := []interface{}{&RecordingRule{}, &AlertRule{}, &AlertSubscribe{}, &AlertMute{},
-		&TaskRecord{}, &ChartShare{}, &Target{}, &Configs{}, &Datasource{}, &NotifyTpl{},
+		&TaskRecord{}, &TaskTpl{}, &ChartShare{}, &Target{}, &Configs{}, &Datasource{}, &NotifyTpl{},
 		&Board{}, &BoardBusigroup{}, &Users{}, &SsoConfig{}, &models.BuiltinMetric{},
 		&models.MetricFilter{}, &models.NotificationRecord{}, &models.TargetBusiGroup{},
 		&models.UserToken{}, &models.DashAnnotation{}, MessageTemplate{}, NotifyRule{}, NotifyChannelConfig{}, &EsIndexPatternMigrate{},
-		&models.EventPipeline{}, &models.EventPipelineExecution{}, &models.EmbeddedProduct{}, &models.SourceToken{},
-		&models.SavedView{}, &models.UserViewFavorite{}}
+		&models.EventPipeline{}, &models.EmbeddedProduct{}, &models.SourceToken{},
+		&models.SavedView{}, &models.UserViewFavorite{},
+		&models.AILLMConfig{}, &models.AIAgent{}, &models.AISkill{}, &models.MCPServer{},
+		&models.AssistantChatRow{}}
 
 	if isPostgres(db) {
+		dts = append(dts, &models.AssistantMessageRow{}) // PostgreSQL: text is unlimited
 		dts = append(dts, &models.PostgresBuiltinComponent{})
+		dts = append(dts, &models.PostgresAISkillFile{})
+		dts = append(dts, &models.PostgresEventPipelineExecution{})
 		DropUniqueFiledLimit(db, &models.PostgresBuiltinComponent{}, "idx_ident", "idx_ident")
 	} else {
+		dts = append(dts, &models.MysqlAssistantMessageRow{}) // MySQL: mediumtext; SQLite: treated as text
 		dts = append(dts, &models.BuiltinComponent{})
+		dts = append(dts, &models.AISkillFile{})
+		dts = append(dts, &models.EventPipelineExecution{})
 		DropUniqueFiledLimit(db, &models.BuiltinComponent{}, "idx_ident", "idx_ident")
 	}
 
@@ -134,6 +191,10 @@ func MigrateTables(db *gorm.DB) error {
 
 	return nil
 }
+
+// AssistantChat / AssistantMessage row structs live in models package
+// (models.AssistantChatRow / models.AssistantMessageRow) so both
+// migrate and storage can share them.
 
 func DropUniqueFiledLimit(db *gorm.DB, dst interface{}, uniqueFiled string, pgUniqueFiled string) { // UNIQUE KEY (`ckey`)
 	// 先检查表是否存在，如果不存在则直接返回
@@ -211,7 +272,12 @@ type ChartShare struct {
 	DatasourceId int64 `gorm:"column:datasource_id;bigint(20);not null;default:0;comment:datasource id"`
 }
 type TaskRecord struct {
-	EventId int64 `gorm:"column:event_id;bigint(20);not null;default:0;comment:event id;index:idx_event_id"`
+	EventId      int64  `gorm:"column:event_id;bigint(20);not null;default:0;comment:event id;index:idx_event_id"`
+	AuthLevel    int    `gorm:"column:auth_level;type:int;not null;default:0;comment:ai task auth level, 0=off 1/2/3=level"`
+	SystemCaller string `gorm:"column:system_caller;type:varchar(64);not null;default:'';comment:caller system, e.g. ai-agent"`
+}
+type TaskTpl struct {
+	AuthLevel int `gorm:"column:auth_level;type:int;not null;default:0;comment:ai task auth level, 0=off 1/2/3=level"`
 }
 type AlertHisEvent struct {
 	LastEvalTime  int64   `gorm:"column:last_eval_time;bigint(20);not null;default:0;comment:for time filter;index:idx_last_eval_time"`
@@ -283,9 +349,13 @@ type BuiltinPayloads struct {
 	Note        string `json:"note" gorm:"type:varchar(1024);not null;default:'';comment:'note of payload'"`
 }
 
+// TaskHostDoing holds one row per (task id, host), so id alone must NOT be the
+// primary key. `primaryKey:false` does not work: GORM force-promotes a lone
+// `id` column to primary key (and implicitly marks int primary keys
+// auto-increment), so declare the natural composite key (id, host) instead.
 type TaskHostDoing struct {
-	Id             int64  `gorm:"column:id;index;primaryKey:false"`
-	Host           string `gorm:"column:host;size:128;not null;index"`
+	Id             int64  `gorm:"column:id;primaryKey;autoIncrement:false;index"`
+	Host           string `gorm:"column:host;size:128;not null;primaryKey;index"`
 	Clock          int64  `gorm:"column:clock;not null;default:0"`
 	Action         string `gorm:"column:action;size:16;not null"`
 	AlertTriggered bool   `gorm:"-"`

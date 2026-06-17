@@ -89,6 +89,12 @@ func (c *Clickhouse) InitClient() error {
 	return c.InitCli()
 }
 
+// Close 释放底层 *sql.DB / *gorm.DB 资源，避免 connectionOpener goroutine 与连接缓冲泄漏。
+// 在 InitClient 失败或缓存替换/删除时由 dscache 通过 io.Closer 断言调用。
+func (c *Clickhouse) Close() error {
+	return c.Clickhouse.Close()
+}
+
 func (c *Clickhouse) Validate(ctx context.Context) error {
 	if len(c.Nodes) == 0 {
 		return fmt.Errorf("ck shard is invalid, please check datasource setting")
@@ -107,6 +113,8 @@ func (c *Clickhouse) Validate(ctx context.Context) error {
 	// 	return fmt.Errorf("ck shard password is empty, please check datasource setting or set password for user")
 	// }
 
+	// 把零值补成默认值, 与 InitCli 保持一致, 避免 dscache 反复触发 Equal 不等而重建客户端
+	c.FillDefaults()
 	return nil
 }
 
@@ -141,6 +149,38 @@ func (c *Clickhouse) Equal(p datasource.Datasource) bool {
 	}
 
 	if c.Password != plg.Password {
+		return false
+	}
+
+	if c.Timeout != plg.Timeout {
+		return false
+	}
+
+	if c.MaxQueryRows != plg.MaxQueryRows {
+		return false
+	}
+
+	if c.Protocol != plg.Protocol {
+		return false
+	}
+
+	if c.SkipSSLVerify != plg.SkipSSLVerify {
+		return false
+	}
+
+	if c.SecureConnection != plg.SecureConnection {
+		return false
+	}
+
+	if c.MaxIdleConns != plg.MaxIdleConns {
+		return false
+	}
+
+	if c.MaxOpenConns != plg.MaxOpenConns {
+		return false
+	}
+
+	if c.ConnMaxLifetime != plg.ConnMaxLifetime {
 		return false
 	}
 

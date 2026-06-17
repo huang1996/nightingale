@@ -17,6 +17,7 @@ import (
 	"github.com/tidwall/match"
 	"github.com/toolkits/pkg/logger"
 	"github.com/toolkits/pkg/str"
+	"gorm.io/gorm"
 )
 
 const (
@@ -130,6 +131,14 @@ type ChildVarConfig struct {
 	ChildVarConfigs *ChildVarConfig         `json:"child_var_configs"`
 }
 
+func (c ChildVarConfig) MarshalJSON() ([]byte, error) {
+	if c.ParamVal == nil {
+		c.ParamVal = []map[string]ParamQuery{}
+	}
+	type Alias ChildVarConfig
+	return json.Marshal(Alias(c))
+}
+
 type ParamQuery struct {
 	ParamType string      `json:"param_type"` // host、device、enum、threshold 三种类型
 	Query     interface{} `json:"query"`
@@ -138,6 +147,14 @@ type ParamQuery struct {
 type VarConfig struct {
 	ParamVal        []ParamQueryForFirst `json:"param_val"`
 	ChildVarConfigs *ChildVarConfig      `json:"child_var_configs"`
+}
+
+func (v VarConfig) MarshalJSON() ([]byte, error) {
+	if v.ParamVal == nil {
+		v.ParamVal = []ParamQueryForFirst{}
+	}
+	type Alias VarConfig
+	return json.Marshal(Alias(v))
 }
 
 // ParamQueryForFirst 同 ParamQuery，仅在第一层出现
@@ -380,10 +397,40 @@ func GetHostsQuery(queries []HostQuery) []map[string]interface{} {
 		switch q.Key {
 		case "group_ids":
 			ids := ParseInt64(q.Values)
+			if len(ids) == 0 {
+				// 没有有效的 group_id，跳过该过滤项，避免生成 `group_id IN ()` 这种非法 SQL。
+				continue
+			}
+			hasZero := false
+			nonZeroIds := make([]int64, 0, len(ids))
+			for _, id := range ids {
+				if id == 0 {
+					hasZero = true
+				} else {
+					nonZeroIds = append(nonZeroIds, id)
+				}
+			}
+			// 注意：以下分支依赖 TargetFilterQueryBuild 在外层对 target_busi_group 使用 LEFT JOIN，
+			// 才能让 target_ident IS NULL 表示「该 target 未归组」。如果外层换成 INNER JOIN，
+			// `== [0]` 与 `!= [0]` 的语义都会被打破。
 			if q.Op == "==" {
-				m["target_busi_group.group_id in (?)"] = ids
+				switch {
+				case hasZero && len(nonZeroIds) == 0:
+					m["target_busi_group.target_ident IS NULL"] = nil
+				case hasZero && len(nonZeroIds) > 0:
+					m["(target_busi_group.target_ident IS NULL OR target_busi_group.group_id IN (?))"] = nonZeroIds
+				default:
+					m["target_busi_group.group_id in (?)"] = nonZeroIds
+				}
 			} else {
-				m["NOT EXISTS (SELECT 1 FROM target_busi_group tbg WHERE tbg.target_ident = target.ident AND tbg.group_id IN (?))"] = ids
+				switch {
+				case hasZero && len(nonZeroIds) == 0:
+					m["target_busi_group.target_ident IS NOT NULL"] = nil
+				case hasZero && len(nonZeroIds) > 0:
+					m["target_busi_group.target_ident IS NOT NULL AND NOT EXISTS (SELECT 1 FROM target_busi_group tbg WHERE tbg.target_ident = target.ident AND tbg.group_id IN (?))"] = nonZeroIds
+				default:
+					m["NOT EXISTS (SELECT 1 FROM target_busi_group tbg WHERE tbg.target_ident = target.ident AND tbg.group_id IN (?))"] = nonZeroIds
+				}
 			}
 		case "tags":
 			lst := []string{}
@@ -594,6 +641,25 @@ func (ar *AlertRule) Add(ctx *ctx.Context) error {
 	ar.UpdateAt = now
 
 	return Insert(ctx, ar)
+}
+
+// Upsert: 同 group 内若存在同名规则则覆盖（保留原 id/create_at/create_by，下游引用不破），否则插入。
+// 用于 force=true 的批量导入场景。调用方传入的 ar 不要预先调用 FE2DB —— 本方法内部处理。
+func (ar *AlertRule) Upsert(ctx *ctx.Context) error {
+	var existing AlertRule
+	err := DB(ctx).Where("group_id = ? AND name = ?", ar.GroupId, ar.Name).Take(&existing).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		if err := ar.FE2DB(); err != nil {
+			return err
+		}
+		return ar.Add(ctx) // 复用 Add 的 Verify + 同名兜底（防 SELECT 与 INSERT 之间的并发插入）
+	}
+
+	return existing.Update(ctx, *ar) // Update 内部会 FE2DB、Verify，并保留 existing 的 id/create_at/create_by
 }
 
 func (ar *AlertRule) Update(ctx *ctx.Context, arf AlertRule) error {
@@ -1089,6 +1155,29 @@ func AlertRuleGetsByBGIds(ctx *ctx.Context, bgids []int64) ([]AlertRule, error) 
 	return lst, err
 }
 
+// AlertRuleGetsLegacyNotifyByBGIds 查老式通知配置（notify_version=0）的告警规则。
+// 用于迁移审计场景：把 notify_version 过滤下推到 SQL，避免全表拉回再内存过滤。
+// includeDisabled=false 时同时过滤 disabled=0。
+func AlertRuleGetsLegacyNotifyByBGIds(ctx *ctx.Context, bgids []int64, includeDisabled bool) ([]AlertRule, error) {
+	session := DB(ctx).Where("notify_version = ?", 0)
+	if len(bgids) > 0 {
+		session = session.Where("group_id in (?)", bgids)
+	}
+	if !includeDisabled {
+		session = session.Where("disabled = ?", 0)
+	}
+
+	var lst []AlertRule
+	err := session.Order("name").Find(&lst).Error
+	if err == nil {
+		for i := 0; i < len(lst); i++ {
+			lst[i].DB2FE()
+		}
+	}
+
+	return lst, err
+}
+
 func AlertRuleGetsAll(ctx *ctx.Context) ([]*AlertRule, error) {
 	if !ctx.IsCenter {
 		lst, err := poster.GetByUrls[[]*AlertRule](ctx, "/v1/n9e/alert-rules?disabled=0")
@@ -1407,6 +1496,39 @@ func GetTargetsOfHostAlertRule(ctx *ctx.Context, engineName string) (map[string]
 	}
 
 	return m, nil
+}
+
+// HostAlertRuleTargetsSig 计算 host 告警规则 -> target 映射的输入签名。
+// 该映射由三部分输入共同决定，任一变化都会改变结果，签名随之变化：
+//  1. host 告警规则（增删/改/启停，都会改变 count 或 max(update_at)）
+//  2. 机器与业务组的归属关系 target_busi_group
+//  3. 机器自身的 tags/host_tags 等字段（变更时 router_heartbeat 会 bump target.update_at）
+//
+// 供 memsto 在每轮同步前做变更检测：签名未变即可跳过整轮规则查询，
+// 避免每个周期对所有 host 规则各发一条全表扫描的过滤 SQL。仅 center 直连 DB 时调用。
+func HostAlertRuleTargetsSig(ctx *ctx.Context) (string, error) {
+	var ruleStat []*Statistics
+	err := DB(ctx).Model(&AlertRule{}).
+		Select("count(*) as total", "max(update_at) as last_updated").
+		Where("prod = ?", HOST).Find(&ruleStat).Error
+	if err != nil {
+		return "", err
+	}
+
+	bgStat, err := StatisticsGet(ctx, &TargetBusiGroup{})
+	if err != nil {
+		return "", err
+	}
+
+	tgStat, err := StatisticsGet(ctx, &Target{})
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("%d:%d|%d:%d|%d:%d",
+		ruleStat[0].Total, ruleStat[0].LastUpdated,
+		bgStat.Total, bgStat.LastUpdated,
+		tgStat.Total, tgStat.LastUpdated), nil
 }
 
 func (ar *AlertRule) Copy(ctx *ctx.Context) (*AlertRule, error) {

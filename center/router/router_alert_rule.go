@@ -9,8 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"gopkg.in/yaml.v2"
-
 	"github.com/ccfos/nightingale/v6/alert/mute"
 	"github.com/ccfos/nightingale/v6/models"
 	"github.com/ccfos/nightingale/v6/pkg/ginx"
@@ -266,6 +264,7 @@ func (rt *Router) alertRuleEnableTryRun(c *gin.Context) {
 
 func (rt *Router) alertRuleAddByImport(c *gin.Context) {
 	username := c.MustGet("username").(string)
+	force := ginx.QueryBool(c, "force", false)
 
 	var lst []models.AlertRule
 	ginx.BindJSON(c, &lst)
@@ -293,7 +292,14 @@ func (rt *Router) alertRuleAddByImport(c *gin.Context) {
 	}
 
 	bgid := ginx.UrlParamInt64(c, "id")
-	reterr := rt.alertRuleAdd(lst, username, bgid, c.GetHeader("X-Language"))
+	lang := c.GetHeader("X-Language")
+
+	var reterr map[string]string
+	if force {
+		reterr = rt.alertRuleUpsert(lst, username, bgid, lang)
+	} else {
+		reterr = rt.alertRuleAdd(lst, username, bgid, lang)
+	}
 
 	ginx.NewRender(c).Data(reterr, nil)
 }
@@ -308,49 +314,9 @@ func (rt *Router) alertRuleAddByImportPromRule(c *gin.Context) {
 	var f promRuleForm
 	ginx.Dangerous(c.BindJSON(&f))
 
-	// 首先尝试解析带 groups 的格式
-	var pr struct {
-		Groups []models.PromRuleGroup `yaml:"groups"`
-	}
-	err := yaml.Unmarshal([]byte(f.Payload), &pr)
-
-	var groups []models.PromRuleGroup
-
-	if err != nil || len(pr.Groups) == 0 {
-		// 如果解析失败或没有 groups，尝试解析规则数组格式
-		var rules []models.PromRule
-		err = yaml.Unmarshal([]byte(f.Payload), &rules)
-		if err != nil {
-			// 最后尝试解析单个规则格式
-			var singleRule models.PromRule
-			err = yaml.Unmarshal([]byte(f.Payload), &singleRule)
-			if err != nil {
-				ginx.Bomb(http.StatusBadRequest, "invalid yaml format. err: %v", err)
-			}
-
-			// 验证单个规则是否有效
-			if singleRule.Alert == "" && singleRule.Record == "" {
-				ginx.Bomb(http.StatusBadRequest, "input yaml is empty or invalid")
-			}
-
-			rules = []models.PromRule{singleRule}
-		}
-
-		// 验证规则数组是否为空
-		if len(rules) == 0 {
-			ginx.Bomb(http.StatusBadRequest, "input yaml contains no rules")
-		}
-
-		// 将规则数组包装成 group
-		groups = []models.PromRuleGroup{
-			{
-				Name:  "imported_rules",
-				Rules: rules,
-			},
-		}
-	} else {
-		// 使用已解析的 groups
-		groups = pr.Groups
+	groups, err := models.ParsePromRuleYAML(f.Payload)
+	if err != nil {
+		ginx.Bomb(http.StatusBadRequest, "%s", err.Error())
 	}
 
 	lst := models.DealPromGroup(groups, f.DatasourceQueries, f.Disabled)
@@ -420,12 +386,34 @@ func (rt *Router) alertRuleAdd(lst []models.AlertRule, username string, bgid int
 		}
 
 		if err := lst[i].FE2DB(); err != nil {
-			reterr[lst[i].Name] = i18n.Sprintf(lang, err.Error())
+			reterr[lst[i].Name] = translateText(lang, err.Error())
 			continue
 		}
 
 		if err := lst[i].Add(rt.Ctx); err != nil {
-			reterr[lst[i].Name] = i18n.Sprintf(lang, err.Error())
+			reterr[lst[i].Name] = translateText(lang, err.Error())
+		} else {
+			reterr[lst[i].Name] = ""
+		}
+	}
+	return reterr
+}
+
+// alertRuleUpsert 与 alertRuleAdd 对位，命中同名则覆盖；用于 force=true 的导入路径。
+// 注意：FE2DB 由 Upsert 内部按分支调用，这里不要预调用，否则覆盖分支会双调 FE2DB 污染累加型字段（如 EnableDaysOfWeek）。
+func (rt *Router) alertRuleUpsert(lst []models.AlertRule, username string, bgid int64, lang string) map[string]string {
+	count := len(lst)
+	reterr := make(map[string]string)
+	for i := 0; i < count; i++ {
+		lst[i].Id = 0
+		lst[i].GroupId = bgid
+		if username != "" {
+			lst[i].CreateBy = username // 仅插入路径生效，覆盖路径会被 existing.CreateBy 还原
+			lst[i].UpdateBy = username
+		}
+
+		if err := lst[i].Upsert(rt.Ctx); err != nil {
+			reterr[lst[i].Name] = translateText(lang, err.Error())
 		} else {
 			reterr[lst[i].Name] = ""
 		}
@@ -862,7 +850,7 @@ func (rt *Router) batchAlertRuleClone(c *gin.Context) {
 		for _, bgid := range f.Bgids {
 			// 为了让 bgid 和 arid 对应，将上面的 err 放到这里处理
 			if err != nil {
-				reterr[fmt.Sprintf("%d-%d", arid, bgid)] = i18n.Sprintf(lang, err.Error())
+				reterr[fmt.Sprintf("%d-%d", arid, bgid)] = translateText(lang, err.Error())
 				continue
 			}
 
@@ -874,7 +862,7 @@ func (rt *Router) batchAlertRuleClone(c *gin.Context) {
 			newAr := ar.Clone(me.Username, bgid)
 			err = newAr.Add(rt.Ctx)
 			if err != nil {
-				reterr[fmt.Sprintf("%d-%d", arid, bgid)] = i18n.Sprintf(lang, err.Error())
+				reterr[fmt.Sprintf("%d-%d", arid, bgid)] = translateText(lang, err.Error())
 				continue
 			}
 		}

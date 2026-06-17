@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/ccfos/nightingale/v6/alert/sender/provider"
 	"github.com/ccfos/nightingale/v6/dscache"
 
 	"github.com/ccfos/nightingale/v6/alert/aconf"
@@ -74,7 +75,7 @@ func Initialize(configDir string, cryptoKey string) (func(), error) {
 	externalProcessors := process.NewExternalProcessors()
 
 	macros.RegisterMacro(macros.MacroInVain)
-	dscache.Init(ctx, false)
+	dscache.Init(ctx, false, config.Alert.Heartbeat.EngineName)
 	Start(config.Alert, config.Pushgw, syncStats, alertStats, externalProcessors, targetCache, busiGroupCache, alertMuteCache, alertRuleCache, notifyConfigCache, taskTplsCache, dsCache, ctx, promClients, userCache, userGroupCache, notifyRuleCache, notifyChannelCache, messageTemplateCache, configCvalCache)
 
 	r := httpx.GinEngine(config.Global.RunMode, config.HTTP,
@@ -104,10 +105,13 @@ func Start(alertc aconf.Alert, pushgwc pconf.Pushgw, syncStats *memsto.Stats, al
 	targetsOfAlertRulesCache := memsto.NewTargetOfAlertRuleCache(ctx, alertc.Heartbeat.EngineName, syncStats)
 
 	go models.InitNotifyConfig(ctx, alertc.Alerting.TemplatesDir)
-	go models.InitNotifyChannel(ctx)
 	go models.InitMessageTemplate(ctx)
+	go models.InitNotifyChannel(ctx)
+	models.VerifyByProvider = provider.VerifyChannelConfig
 
 	naming := naming.NewNaming(ctx, alertc.Heartbeat, alertStats)
+	// TODO(dingtalkapp): 钉钉应用本次不上线，先屏蔽 Stream 主备选举入口，避免启动回调长连接；待上线时恢复本行。
+	// notifyChannelCache.SetDingtalkLeaderNaming(naming)
 
 	writers := writer.NewWriters(pushgwc)
 	record.NewScheduler(alertc, recordingRuleCache, promClients, writers, alertStats, datasourceCache)
@@ -116,6 +120,8 @@ func Start(alertc aconf.Alert, pushgwc pconf.Pushgw, syncStats *memsto.Stats, al
 		busiGroupCache, alertMuteCache, datasourceCache, promClients, naming, ctx, alertStats)
 
 	eventProcessorCache := memsto.NewEventProcessorCache(ctx, syncStats)
+
+	sender.InitStaticGlobalWebhook(alertc.Alerting.GlobalWebhook)
 
 	dp := dispatch.NewDispatch(alertRuleCache, userCache, userGroupCache, alertSubscribeCache, targetCache, notifyConfigCache, taskTplsCache, notifyRuleCache, notifyChannelCache, messageTemplateCache, eventProcessorCache, configCvalCache, alertc.Alerting, ctx, alertStats)
 	consumer := dispatch.NewConsumer(alertc.Alerting, ctx, dp, promClients, alertMuteCache)
